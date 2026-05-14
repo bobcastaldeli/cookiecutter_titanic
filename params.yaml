@@ -1,0 +1,27 @@
+project:
+  name: "modelo-titanic"
+  experiment_name: "modelo-titanic"
+
+data:
+  raw_path: "data/raw/titanic.csv"
+  processed_path: "data/processed/titanic_processed.parquet"
+  features_path: "data/features/titanic_features.parquet"
+  train_path: "data/features/train.parquet"
+  test_path: "data/features/test.parquet"
+
+model:
+  target_column: "survived"
+  model_path: "models/model.pkl"
+  test_size: 0.2
+  random_state: 42
+
+training:
+  n_estimators: 300
+  max_depth: 5
+  min_samples_leaf: 5
+
+reports:
+  metrics_path: "reports/metrics/metrics.json"
+  classification_report_path: "reports/metrics/classification_report.json"
+  confusion_matrix_path: "reports/figures/confusion_matrix.png"
+  feature_importance_path: "reports/figures/feature_importance.png"

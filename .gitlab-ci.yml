@@ -1,0 +1,74 @@
+stages:
+  - quality
+  - test
+  - train
+  - report
+
+variables:
+  PYTHONPATH: "$CI_PROJECT_DIR/src"
+  MLFLOW_EXPERIMENT_NAME: "modelo-titanic"
+
+default:
+  image: python:3.11-slim
+
+before_script:
+  - python -m pip install --upgrade pip
+  - pip install -e ".[dev]"
+
+lint:
+  stage: quality
+  script:
+    - ruff check .
+    - ruff format --check .
+
+unit_tests:
+  stage: test
+  script:
+    - pytest
+
+train_model:
+  image: iterativeai/cml:0-dvc2-base1
+  stage: train
+  before_script:
+    - pip install -e ".[dev]"
+  script:
+    - dvc pull
+    - dvc repro
+    - dvc metrics show --md > report.md
+    - echo "" >> report.md
+    - echo "## Artefatos gerados" >> report.md
+    - echo "- Matriz de confusão: reports/figures/confusion_matrix.png" >> report.md
+    - echo "- Importância das variáveis: reports/figures/feature_importance.png" >> report.md
+    - echo "" >> report.md
+    - echo "## MLflow" >> report.md
+    - echo "Experimento: ${MLFLOW_EXPERIMENT_NAME}" >> report.md
+  artifacts:
+    when: always
+    paths:
+      - report.md
+      - reports/
+      - models/
+      - dvc.lock
+    expire_in: 7 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+cml_report:
+  image: iterativeai/cml:0-dvc2-base1
+  stage: report
+  needs:
+    - job: train_model
+      artifacts: true
+  script:
+    - echo "## Relatório do modelo Titanic" > cml_report.md
+    - cat report.md >> cml_report.md
+    - echo "" >> cml_report.md
+    - echo "## Matriz de confusão" >> cml_report.md
+    - cml publish reports/figures/confusion_matrix.png --md >> cml_report.md
+    - echo "" >> cml_report.md
+    - echo "## Importância das variáveis" >> cml_report.md
+    - cml publish reports/figures/feature_importance.png --md >> cml_report.md
+    - cml comment update --watermark-title="modelo-titanic-report" cml_report.md
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

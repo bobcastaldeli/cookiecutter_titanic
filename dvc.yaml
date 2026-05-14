@@ -1,0 +1,51 @@
+stages:
+  make_dataset:
+    cmd: python -m modelo_titanic.data.make_dataset
+    deps:
+      - src/modelo_titanic/data/make_dataset.py
+      - src/modelo_titanic/config.py
+      - data/raw/titanic.csv
+      - params.yaml
+    outs:
+      - data/processed/titanic_processed.parquet
+
+  build_features:
+    cmd: python -m modelo_titanic.features.build_features
+    deps:
+      - src/modelo_titanic/features/build_features.py
+      - src/modelo_titanic/config.py
+      - data/processed/titanic_processed.parquet
+      - params.yaml
+    outs:
+      - data/features/titanic_features.parquet
+      - data/features/train.parquet
+      - data/features/test.parquet
+
+  train:
+    cmd: python -m modelo_titanic.models.train
+    deps:
+      - src/modelo_titanic/models/train.py
+      - src/modelo_titanic/config.py
+      - data/features/train.parquet
+      - params.yaml
+    outs:
+      - models/model.pkl
+
+  evaluate:
+    cmd: python -m modelo_titanic.models.evaluate
+    deps:
+      - src/modelo_titanic/models/evaluate.py
+      - src/modelo_titanic/config.py
+      - data/features/test.parquet
+      - models/model.pkl
+      - params.yaml
+    metrics:
+      - reports/metrics/metrics.json:
+          cache: false
+      - reports/metrics/classification_report.json:
+          cache: false
+    plots:
+      - reports/figures/confusion_matrix.png:
+          cache: false
+      - reports/figures/feature_importance.png:
+          cache: false

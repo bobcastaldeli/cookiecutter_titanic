@@ -1,0 +1,6 @@
+[core]
+    remote = azure
+
+['remote "azure"']
+    url = azure://teste/teste
+    account_name = teste

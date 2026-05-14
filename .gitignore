@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.env
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Data
+data/raw/*
+data/interim/*
+data/processed/*
+data/features/*
+!data/**/.gitkeep
+
+# Models
+models/*
+!models/.gitkeep
+
+# Reports
+reports/**/*.png
+reports/**/*.html
+reports/**/*.json
+!reports/**/.gitkeep
+
+# MLflow local fallback
+mlruns/
+
+# DVC
+.dvc/tmp
+.dvc/cache
+.dvc/config.local
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OS / IDE
+.vscode/
+.idea/
+.DS_Store
