@@ -1,0 +1,78 @@
+# src/data_loader.py
+
+import pandas as pd
+from src.config import BENNER_COLUMNS, DEEPLEGAL_PROCESSOS_COLUMNS
+from src.preprocessing import normalize_process_number, standardize_text, create_value_bucket
+
+
+def read_file(path):
+    """
+    Lê CSV ou Parquet.
+    """
+    if path.endswith(".csv"):
+        return pd.read_csv(path, sep=None, engine="python")
+    elif path.endswith(".parquet"):
+        return pd.read_parquet(path)
+    elif path.endswith(".xlsx"):
+        return pd.read_excel(path)
+    else:
+        raise ValueError(f"Formato não suportado: {path}")
+
+
+def rename_available_columns(df, mapping):
+    """
+    Renomeia somente as colunas que existem no dataframe.
+    """
+    reverse_mapping = {
+        original: standard
+        for standard, original in mapping.items()
+        if original in df.columns
+    }
+
+    return df.rename(columns=reverse_mapping)
+
+
+def load_and_prepare_data(
+    benner_path: str,
+    deeplegal_processos_path: str | None = None,
+):
+    benner = read_file(benner_path)
+    benner = rename_available_columns(benner, BENNER_COLUMNS)
+
+    if "process_number" not in benner.columns:
+        raise ValueError("Coluna de número do processo não encontrada no Benner.")
+
+    benner["process_number_norm"] = benner["process_number"].apply(normalize_process_number)
+
+    for col in benner.columns:
+        if benner[col].dtype == "object":
+            benner[col] = benner[col].apply(standardize_text)
+
+    if "valor_ajuizado" in benner.columns:
+        benner["valor_ajuizado_bucket"] = benner["valor_ajuizado"].apply(create_value_bucket)
+    else:
+        benner["valor_ajuizado_bucket"] = "SEM_VALOR"
+
+    if deeplegal_processos_path:
+        deeplegal = read_file(deeplegal_processos_path)
+        deeplegal = rename_available_columns(deeplegal, DEEPLEGAL_PROCESSOS_COLUMNS)
+
+        if "process_number" not in deeplegal.columns:
+            raise ValueError("Coluna de número do processo não encontrada no DeepLegal.")
+
+        deeplegal["process_number_norm"] = deeplegal["process_number"].apply(normalize_process_number)
+
+        for col in deeplegal.columns:
+            if deeplegal[col].dtype == "object":
+                deeplegal[col] = deeplegal[col].apply(standardize_text)
+
+        df = benner.merge(
+            deeplegal,
+            on="process_number_norm",
+            how="left",
+            suffixes=("_benner", "_deeplegal"),
+        )
+
+        return df
+
+    return benner
