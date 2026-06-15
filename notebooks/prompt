@@ -1,0 +1,783 @@
+# Prompt para Cursor — Correção da Base de Target, Feature Store e Pipeline de Modelagem para Modelo de Simulação → Proposta
+
+## Contexto do projeto
+
+Estou trabalhando em um projeto de **Pricing Optimization para financiamento de veículos**.
+
+O funil de negócio é:
+
+```text
+Simulação → Proposta → Aprovação → Contrato
+```
+
+Neste momento, estou construindo o **primeiro modelo do funil**, cujo objetivo é prever:
+
+```text
+Dada uma simulação, qual a probabilidade dessa simulação virar proposta?
+```
+
+O target deste primeiro modelo deve ser:
+
+```python
+target_proposta = fl_proposta
+```
+
+Onde:
+
+```text
+1 = simulação virou proposta
+0 = simulação não virou proposta
+```
+
+A base original é uma base analítica de simulações, com múltiplas simulações por cliente ao longo do tempo. Um mesmo cliente pode fazer várias simulações até encontrar uma taxa, prazo, entrada ou condição adequada.
+
+O projeto possui atualmente estes notebooks:
+
+```text
+01_create_target.ipynb
+02_feature_store_simulacoes_proposta.ipynb
+03_join_dataset_modelagem.ipynb
+04_validacao_baseline_feature_selection_proposta.ipynb
+```
+
+Preciso corrigir principalmente o notebook de criação do target e garantir que a feature store e o dataset final de modelagem não tenham vazamento de informação.
+
+---
+
+## Objetivo da correção
+
+Quero que você revise e corrija os notebooks para que o modelo seja adequado para o problema:
+
+```text
+Prever, no momento da simulação, se aquela simulação vai virar proposta.
+```
+
+O pipeline correto deve:
+
+1. Criar uma base de target sem vazamento.
+2. Não usar eventos futuros para selecionar linhas.
+3. Não remover positivos válidos do target.
+4. Criar features somente com informações disponíveis até a simulação.
+5. Fazer o join entre target e feature store de forma segura.
+6. Garantir que nenhuma variável futura entre no treino.
+7. Preparar o dataset final para o notebook de validação/modelagem.
+
+---
+
+## Problemas identificados no fluxo atual
+
+### Problema 1 — Uso incorreto de `fl_aprovado == 0`
+
+No fluxo atual, em algum momento foi utilizado um filtro parecido com:
+
+```python
+df_proposta = df_simulacoes[
+    (df_simulacoes["fl_proposta"].isin([0, 1]))
+    & (df_simulacoes["fl_aprovado"] == 0)
+]
+```
+
+Esse filtro precisa ser revisado.
+
+Para o modelo de proposta, **não devemos remover simulações que viraram proposta e depois foram aprovadas**.
+
+Exemplo:
+
+```text
+Simulação → Proposta → Aprovação
+              ↑
+       target_proposta = 1
+```
+
+Mesmo que a proposta tenha sido aprovada depois, ela continua sendo um caso positivo para o primeiro modelo.
+
+Portanto, para o modelo `simulação → proposta`, o correto é:
+
+```python
+df_target = df_simulacoes[
+    df_simulacoes["fl_proposta"].isin([0, 1])
+].copy()
+
+df_target["target_proposta"] = df_target["fl_proposta"].astype(int)
+```
+
+Não usar `fl_aprovado == 0` como filtro para remover linhas.
+
+A coluna `fl_aprovado` deve ser removida como feature, mas não deve ser usada para excluir casos positivos do target.
+
+---
+
+### Problema 2 — Uso de `fl_contrato`, `fl_aprovado` e `fl_proposta` para criar `fl_priorizacao`
+
+No fluxo atual, existe uma regra de priorização de simulação por CPF/mês/revenda/fl_zero usando algo parecido com:
+
+```python
+Window.partitionBy(
+    "id_cpf_cnpj",
+    year("dt_simulacao"),
+    month("dt_simulacao"),
+    "cod_rev",
+    "fl_zero"
+).orderBy(
+    col("fl_contrato").desc(),
+    col("fl_aprovado").desc(),
+    col("fl_proposta").desc(),
+    col("dt_simulacao").desc()
+)
+```
+
+Essa regra usa eventos futuros para escolher qual linha será usada no treino.
+
+Isso gera um problema de:
+
+```text
+vazamento por seleção da amostra
+```
+
+Mesmo que `fl_contrato`, `fl_aprovado` e `fl_proposta` não entrem como features do modelo, eles estão sendo usados para escolher a linha que entra no dataset.
+
+Em produção, antes de a simulação acontecer, não saberemos qual simulação vai virar proposta, aprovação ou contrato.
+
+Portanto, essa regra não deve ser usada para selecionar a linha de modelagem caso o objetivo seja scorear simulações no momento em que elas acontecem.
+
+---
+
+## Decisão de modelagem recomendada
+
+Para este primeiro modelo, usar a abordagem:
+
+```text
+Modelo em nível de simulação.
+```
+
+Ou seja:
+
+```text
+1 linha = 1 simulação
+target = fl_proposta
+```
+
+Nesse caso, não filtrar por `fl_priorizacao`.
+
+Usar todas as simulações elegíveis, respeitando apenas filtros de escopo do problema, como:
+
+```python
+df_simulacoes = df_analitica[
+    (df_analitica["tp_politica"] == "GHPE")
+    & (df_analitica["tx_simul"] != 0)
+].copy()
+```
+
+Depois:
+
+```python
+df_target = df_simulacoes[
+    df_simulacoes["fl_proposta"].isin([0, 1])
+].copy()
+
+df_target["target_proposta"] = df_target["fl_proposta"].astype(int)
+```
+
+Não usar `fl_aprovado == 0`.
+
+Não usar `fl_priorizacao == 1`.
+
+---
+
+## Caso seja obrigatório usar uma única linha por CPF/mês
+
+Se por decisão de negócio for necessário ter apenas uma linha por CPF/mês ou por jornada, a seleção da linha deve usar somente informações disponíveis em produção.
+
+Regras permitidas:
+
+```text
+última simulação do CPF no mês
+primeira simulação do CPF no mês
+última simulação disponível até a data de corte
+simulação mais recente da jornada
+simulação com menor taxa até aquele momento
+```
+
+Regras proibidas:
+
+```text
+simulação que virou proposta
+simulação que virou aprovação
+simulação que virou contrato
+simulação mais avançada no funil
+```
+
+Se precisar manter uma linha por CPF/mês, substituir a lógica de priorização por algo como:
+
+```python
+from pyspark.sql.window import Window
+from pyspark.sql.functions import row_number, year, month, col
+
+w = (
+    Window
+    .partitionBy(
+        "id_cpf_cnpj",
+        year("dt_simulacao"),
+        month("dt_simulacao"),
+        "cod_rev",
+        "fl_zero"
+    )
+    .orderBy(
+        col("dt_simulacao").desc()
+    )
+)
+
+df_target = (
+    df_simulacoes
+    .withColumn("rn_priorizacao_sem_leakage", row_number().over(w))
+    .filter(col("rn_priorizacao_sem_leakage") == 1)
+)
+```
+
+Mas a recomendação principal para este momento é trabalhar no nível de simulação e não usar essa priorização.
+
+---
+
+## Filtros de escopo permitidos
+
+Manter filtros de escopo que não dependem de eventos futuros:
+
+```python
+df_simulacoes = df_analitica[
+    (df_analitica["tp_politica"] == "GHPE")
+    & (df_analitica["tx_simul"] != 0)
+].copy()
+```
+
+Esses filtros são aceitáveis se o modelo será aplicado somente em:
+
+```text
+simulações da política GHPE
+com tx_simul diferente de zero
+```
+
+Documentar isso no notebook.
+
+---
+
+## Colunas que devem ser removidas por vazamento
+
+Remover do dataset de modelagem, e principalmente das features, qualquer coluna que represente evento futuro ou informação pós-proposta.
+
+Lista mínima de colunas proibidas:
+
+```python
+COLUNAS_VAZAMENTO_EXPLICITAS = {
+    "id_proposta",
+    "dt_proposta",
+    "dt_contrato",
+    "id_contrato",
+    "fl_aprovado",
+    "fl_contrato",
+    "fl_priorizacao",
+    "target_proposta",
+    "fl_proposta",
+}
+```
+
+Também remover colunas com padrões de nome suspeitos:
+
+```python
+colunas_vazamento = [
+    col for col in df.columns
+    if (
+        col in COLUNAS_VAZAMENTO_EXPLICITAS
+        or col.endswith("_prop")
+        or col.endswith("_proposta")
+        or col.endswith("_contrato")
+        or col.endswith("_aprovado")
+        or col.endswith("_pond")
+    )
+]
+```
+
+Importante:
+
+- `target_proposta` e `fl_proposta` podem existir no dataframe final para validação, mas nunca devem entrar em `feature_cols`.
+- `id_cpf_cnpj`, `id_pricing`, `id_chave_execucao` podem ser usados como chaves e para criação de features históricas, mas não devem entrar diretamente como features do modelo.
+
+---
+
+## Ajustes esperados no notebook `01_create_target.ipynb`
+
+Corrigir o notebook para executar os seguintes passos:
+
+### 1. Carregar base analítica
+
+```python
+df_analitica = ...
+```
+
+### 2. Remover colunas constantes
+
+Manter a remoção de colunas constantes, como já foi feito:
+
+```python
+colunas_constantes = [
+    col for col in df_analitica.columns
+    if df_analitica[col].nunique(dropna=False) == 1
+]
+
+df_analitica = df_analitica.drop(columns=colunas_constantes)
+```
+
+Documentar quais colunas foram removidas.
+
+### 3. Aplicar filtros de escopo
+
+```python
+df_simulacoes = df_analitica[
+    (df_analitica["tp_politica"] == "GHPE")
+    & (df_analitica["tx_simul"] != 0)
+].copy()
+```
+
+### 4. Criar target correto
+
+```python
+df_target = df_simulacoes[
+    df_simulacoes["fl_proposta"].isin([0, 1])
+].copy()
+
+df_target["target_proposta"] = df_target["fl_proposta"].astype(int)
+```
+
+Não filtrar `fl_aprovado == 0`.
+
+Não filtrar `fl_priorizacao == 1`.
+
+### 5. Remover colunas de vazamento das features
+
+Manter o target no dataframe, mas remover colunas proibidas da lista de features.
+
+Exemplo:
+
+```python
+COLUNAS_VAZAMENTO_EXPLICITAS = {
+    "id_proposta",
+    "dt_proposta",
+    "dt_contrato",
+    "id_contrato",
+    "fl_aprovado",
+    "fl_contrato",
+    "fl_priorizacao",
+}
+
+colunas_vazamento = [
+    col for col in df_target.columns
+    if (
+        col in COLUNAS_VAZAMENTO_EXPLICITAS
+        or col.endswith("_prop")
+        or col.endswith("_contrato")
+        or col.endswith("_aprovado")
+        or col.endswith("_pond")
+    )
+]
+
+df_target = df_target.drop(columns=colunas_vazamento, errors="ignore")
+```
+
+Atenção: manter `fl_proposta` e `target_proposta` para auditoria, mas garantir depois que não entram em `feature_cols`.
+
+### 6. Validar target
+
+Adicionar as validações:
+
+```python
+assert "target_proposta" in df_target.columns
+assert df_target["target_proposta"].isin([0, 1]).all()
+assert df_target["id_pricing"].notna().all()
+assert df_target["id_pricing"].is_unique
+
+print("Distribuição do target:")
+print(df_target["target_proposta"].value_counts(dropna=False))
+print(f"Taxa de conversão: {df_target['target_proposta'].mean():.4%}")
+print(f"Shape final df_target: {df_target.shape}")
+```
+
+### 7. Salvar target corrigido
+
+```python
+OUTPUT_PATH = PROCESSED_DIR / "df_target_proposta.parquet"
+
+df_target.to_parquet(OUTPUT_PATH, index=False)
+print(f"Arquivo salvo em: {OUTPUT_PATH}")
+```
+
+---
+
+## Ajustes esperados no notebook `02_feature_store_simulacoes_proposta.ipynb`
+
+A feature store deve ser criada usando o mesmo universo elegível de simulações, sem usar eventos futuros.
+
+Se a feature store for criada antes do target, ela deve usar:
+
+```python
+df_fs_base = df_simulacoes.copy()
+```
+
+Ou seja, o mesmo filtro de escopo:
+
+```python
+df_fs_base = df_analitica[
+    (df_analitica["tp_politica"] == "GHPE")
+    & (df_analitica["tx_simul"] != 0)
+].copy()
+```
+
+Não usar `fl_priorizacao`.
+
+Não usar `fl_aprovado` ou `fl_contrato` para filtrar linhas.
+
+### Features permitidas
+
+Criar features apenas com informações disponíveis até a simulação.
+
+Exemplos permitidos:
+
+```text
+dt_simulacao
+tp_politica
+tp_teste_elasticidade
+id_cluster
+num_prazo
+cod_rev
+vl_financiado
+vl_entrada
+pct_entrada
+tp_gh
+fl_zero
+num_ano_mod_veic
+tx_simul
+tp_retorno_comissao
+fx_ano_mod_veic
+fx_entrada
+periodo_arquivo
+```
+
+### Features de quantidade de simulações
+
+Garantir que as features de contagem usam apenas passado ou até a linha atual:
+
+Permitidas:
+
+```text
+qtd_simulacoes_cliente_ate_agora
+qtd_simulacoes_cliente_dia_ate_agora
+qtd_simulacoes_jornada_ate_agora
+ordem_simulacao_na_jornada
+tempo_desde_primeira_simulacao
+tempo_desde_simulacao_anterior
+taxa_anterior
+delta_taxa_vs_anterior
+taxa_min_ate_agora
+taxa_media_ate_agora
+```
+
+Proibidas:
+
+```text
+qtd_total_simulacoes_da_jornada
+menor_taxa_final_da_jornada
+ultima_taxa_final_da_jornada
+flag_se_alguma_simulacao_futura_virou_proposta
+```
+
+### Chaves
+
+A feature store deve conter:
+
+```text
+id_pricing
+id_chave_execucao
+id_cpf_cnpj
+dt_simulacao
+periodo_arquivo
+```
+
+Mas esses identificadores não devem ser usados diretamente como features do modelo.
+
+---
+
+## Ajustes esperados no notebook `03_join_dataset_modelagem.ipynb`
+
+O join final deve ser entre:
+
+```text
+df_target_proposta.parquet
+fs_simulacoes_proposta.parquet
+```
+
+A chave principal deve ser:
+
+```python
+JOIN_KEY = "id_pricing"
+```
+
+Fazer validações pré-join:
+
+```python
+assert JOIN_KEY in df_target.columns
+assert JOIN_KEY in df_fs.columns
+assert "target_proposta" in df_target.columns
+
+assert df_target[JOIN_KEY].notna().all(), "id_pricing nulo em df_target"
+assert df_fs[JOIN_KEY].notna().all(), "id_pricing nulo na feature store"
+
+assert df_target[JOIN_KEY].is_unique, "id_pricing duplicado em df_target"
+assert df_fs[JOIN_KEY].is_unique, "id_pricing duplicado na feature store"
+```
+
+Calcular cobertura:
+
+```python
+cobertura = df_target[JOIN_KEY].isin(df_fs[JOIN_KEY]).mean()
+print(f"Cobertura de join target na FS: {cobertura:.4%}")
+
+faltantes = df_target.loc[
+    ~df_target[JOIN_KEY].isin(df_fs[JOIN_KEY]),
+    [JOIN_KEY]
+]
+
+extras_fs = df_fs.loc[
+    ~df_fs[JOIN_KEY].isin(df_target[JOIN_KEY]),
+    [JOIN_KEY]
+]
+
+print(f"Linhas de target sem match na FS: {len(faltantes):,}")
+print(f"Linhas da FS fora do target: {len(extras_fs):,}")
+```
+
+Fazer join:
+
+```python
+df_model = df_target.merge(
+    df_fs,
+    on=JOIN_KEY,
+    how="inner",
+    validate="1:1"
+)
+```
+
+Validações pós-join:
+
+```python
+assert len(df_model) == len(df_target), (
+    "Join inner removeu linhas do target. Verifique cobertura da feature store."
+)
+
+assert df_model[JOIN_KEY].is_unique, (
+    "Join gerou duplicidade em id_pricing"
+)
+```
+
+Se existir `target_proposta` na feature store, validar consistência:
+
+```python
+if "target_proposta" in df_fs.columns:
+    check_target = df_target.merge(
+        df_fs[[JOIN_KEY, "target_proposta"]],
+        on=JOIN_KEY,
+        how="left",
+        suffixes=("_target", "_fs"),
+        validate="1:1"
+    )
+
+    divergencias = (
+        check_target["target_proposta_target"]
+        != check_target["target_proposta_fs"]
+    ).sum()
+
+    assert divergencias == 0, (
+        f"target_proposta diverge entre target e feature store em {divergencias} linhas"
+    )
+```
+
+Salvar dataset final:
+
+```python
+OUTPUT_MODEL_PATH = PROCESSED_DIR / "df_model_proposta.parquet"
+
+df_model.to_parquet(OUTPUT_MODEL_PATH, index=False)
+print(f"Dataset de modelagem salvo em: {OUTPUT_MODEL_PATH}")
+print(f"Shape final: {df_model.shape}")
+```
+
+---
+
+## Ajustes esperados no notebook `04_validacao_baseline_feature_selection_proposta.ipynb`
+
+O notebook de validação/modelagem deve carregar o dataset final do join:
+
+```python
+INPUT_FEATURE_STORE = PROCESSED_DIR / "df_model_proposta.parquet"
+```
+
+Ou renomear internamente:
+
+```python
+fs = pd.read_parquet(INPUT_FEATURE_STORE)
+```
+
+Garantir que o target é:
+
+```python
+target_col = "target_proposta"
+```
+
+Garantir que as features não incluem colunas proibidas:
+
+```python
+COLS_PROIBIDAS_FEATURES = {
+    "fl_proposta",
+    "target_proposta",
+    "fl_priorizacao",
+    "fl_aprovado",
+    "fl_contrato",
+    "id_proposta",
+    "dt_proposta",
+    "id_contrato",
+    "dt_contrato",
+}
+
+feature_cols = [
+    col for col in feature_cols
+    if col not in COLS_PROIBIDAS_FEATURES
+]
+
+assert not any(col in feature_cols for col in COLS_PROIBIDAS_FEATURES), (
+    "Existem colunas de vazamento em feature_cols"
+)
+```
+
+Garantir que identificadores não entram diretamente no modelo:
+
+```python
+ID_COLS = {
+    "id_cpf_cnpj",
+    "id_pricing",
+    "id_chave_execucao",
+    "id_jornada_proxy",
+}
+
+feature_cols = [
+    col for col in feature_cols
+    if col not in ID_COLS
+]
+```
+
+---
+
+## Validações finais que devem ser implementadas
+
+Antes de treinar qualquer modelo, criar uma célula de auditoria com:
+
+```python
+print("Shape final:", df_model.shape)
+
+print("Distribuição do target:")
+print(df_model["target_proposta"].value_counts(dropna=False))
+print(f"Taxa de conversão: {df_model['target_proposta'].mean():.4%}")
+
+print("Período mínimo:", df_model["dt_simulacao"].min())
+print("Período máximo:", df_model["dt_simulacao"].max())
+
+print("Quantidade de clientes:", df_model["id_cpf_cnpj"].nunique())
+print("Quantidade de simulações:", len(df_model))
+print("Média de simulações por cliente:", len(df_model) / df_model["id_cpf_cnpj"].nunique())
+
+cols_suspeitas = [
+    col for col in df_model.columns
+    if (
+        "contrato" in col.lower()
+        or "aprov" in col.lower()
+        or "proposta" in col.lower()
+        or col.endswith("_pond")
+    )
+]
+
+print("Colunas suspeitas presentes:")
+print(cols_suspeitas)
+```
+
+Depois validar que as colunas suspeitas não estão em `feature_cols`.
+
+---
+
+## Critérios de aceite
+
+Considere a correção concluída apenas se todos os critérios abaixo forem atendidos:
+
+### Target
+
+- [ ] `target_proposta` existe.
+- [ ] `target_proposta` contém apenas 0 e 1.
+- [ ] `target_proposta` é igual a `fl_proposta`, caso `fl_proposta` esteja presente.
+- [ ] Não foi usado `fl_aprovado == 0` para remover linhas.
+- [ ] Não foi usado `fl_priorizacao == 1` baseada em `fl_proposta`, `fl_aprovado` ou `fl_contrato`.
+- [ ] Nenhum evento futuro foi usado para escolher linhas do dataset.
+
+### Feature Store
+
+- [ ] Feature store criada com o universo elegível de simulações.
+- [ ] Features de quantidade usam apenas passado ou até a linha atual.
+- [ ] Nenhuma feature usa total final da jornada.
+- [ ] Nenhuma feature usa `fl_proposta`, `fl_aprovado` ou `fl_contrato`.
+
+### Join
+
+- [ ] Join feito por `id_pricing`.
+- [ ] `id_pricing` é único no target.
+- [ ] `id_pricing` é único na feature store.
+- [ ] Cobertura do target na feature store é 100%.
+- [ ] Join não remove linhas do target.
+- [ ] Join não cria duplicidades.
+
+### Modelagem
+
+- [ ] `feature_cols` não contém target.
+- [ ] `feature_cols` não contém identificadores puros.
+- [ ] `feature_cols` não contém colunas de proposta, aprovação ou contrato.
+- [ ] Split temporal será aplicado depois da correção.
+- [ ] Métricas do notebook 04 serão calculadas com o dataset corrigido.
+
+---
+
+## Resultado esperado
+
+Ao final, quero que o projeto tenha os seguintes arquivos corrigidos:
+
+```text
+data/processed/df_target_proposta.parquet
+data/features/fs_simulacoes_proposta.parquet
+data/processed/df_model_proposta.parquet
+```
+
+E os notebooks devem estar consistentes para a execução do pipeline:
+
+```text
+01_create_target.ipynb
+02_feature_store_simulacoes_proposta.ipynb
+03_join_dataset_modelagem.ipynb
+04_validacao_baseline_feature_selection_proposta.ipynb
+```
+
+O mais importante é garantir que o modelo final represente corretamente a pergunta:
+
+```text
+No momento da simulação, qual é a chance de essa simulação virar proposta?
+```
+
+Sem usar informação futura para:
+
+```text
+selecionar linhas,
+criar features,
+filtrar casos,
+ou construir o target.
+```
