@@ -55,3 +55,27 @@ def criar_id_jornada_pandas(
     )
 
     return df
+    
+def check_pd_na_issues(df, name="df"):
+    print(f"\n{name}")
+    print("shape:", df.shape)
+
+    # Colunas com pd.NA/nulos
+    nulls = df.isna().sum()
+    print("\nColunas com nulos:")
+    print(nulls[nulls > 0].sort_values(ascending=False).head(30))
+
+    # Dtypes problemáticos
+    print("\nDtypes:")
+    print(df.dtypes.value_counts())
+
+    print("\nColunas com dtype nullable:")
+    nullable_cols = [
+        col for col in df.columns
+        if str(df[col].dtype) in ["Int64", "Float64", "boolean", "string"]
+    ]
+    print(nullable_cols[:50])
+
+check_pd_na_issues(df_train, "df_train")
+check_pd_na_issues(df_test, "df_test")
+check_pd_na_issues(df_oot, "df_oot")
