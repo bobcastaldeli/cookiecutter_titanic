@@ -79,3 +79,21 @@ def check_pd_na_issues(df, name="df"):
 check_pd_na_issues(df_train, "df_train")
 check_pd_na_issues(df_test, "df_test")
 check_pd_na_issues(df_oot, "df_oot")
+
+df_train = df_train.replace({pd.NA: np.nan})
+df_test = df_test.replace({pd.NA: np.nan})
+df_oot = df_oot.replace({pd.NA: np.nan})
+
+for col in categorical_features:
+    df_train[col] = df_train[col].astype("object").where(df_train[col].notna(), "MISSING").astype(str)
+    df_test[col] = df_test[col].astype("object").where(df_test[col].notna(), "MISSING").astype(str)
+    df_oot[col] = df_oot[col].astype("object").where(df_oot[col].notna(), "MISSING").astype(str)
+
+for col in numeric_features:
+    df_train[col] = pd.to_numeric(df_train[col], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    df_test[col] = pd.to_numeric(df_test[col], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    df_oot[col] = pd.to_numeric(df_oot[col], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+df_train[TARGET_COL] = df_train[TARGET_COL].astype(int)
+df_test[TARGET_COL] = df_test[TARGET_COL].astype(int)
+df_oot[TARGET_COL] = df_oot[TARGET_COL].astype(int)
